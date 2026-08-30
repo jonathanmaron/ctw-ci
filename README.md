@@ -45,7 +45,6 @@ jobs:
         with:
             php_version: '8.5'
             php_versions: '["8.5"]'
-            php_versions_canary: '["8.6"]'
 ```
 
 `bin/rollout.py` writes exactly that file, so there is no need to type it. See
@@ -213,6 +212,14 @@ button on the Actions tab covers the ad-hoc case before then.
 | `php_version`         | string | `'8.5'`            | PHP for the eight jobs that are off the matrix.                               |
 | `php_versions`        | string | `'["8.5", "8.6"]'` | JSON array of every PHP version the library is tested against.                |
 | `php_versions_canary` | string | `'[]'`             | JSON array of versions tried out rather than supported. Non-blocking.         |
+
+The canary is **currently off in every `ctw` library**, and `bin/rollout.py`
+writes the input commented out rather than omitting it. 8.6 could not be
+installed at all wherever a library reaches Laminas —
+`laminas/laminas-diactoros` 3.8.0 declares
+`php ~8.2.0 || ~8.3.0 || ~8.4.0 || ~8.5.0` — so the job failed at
+`composer update` and reported nothing about the library it was testing.
+Uncomment it once the ecosystem allows 8.6.
 | `source_dir`          | string | `'src'`            | Library source directory. Read by the require checker whitelist and Infection. |
 
 Keep `php_version` at the **lowest** PHP version the library supports.
@@ -334,6 +341,25 @@ would not be in the library's own tree: it holds one tool and nothing else. A
 tool shipped as a Composer plugin installs but never activates unless it is
 allowed, and a plugin-optional one says so in a warning rather than an error, so
 its command would simply not exist.
+
+**A config file these tools read cannot assume the library's autoloader.** The
+tool runs from `/tmp/ci-tools`, so its process knows nothing of the library's
+namespaces — while the same tool run from the library's own `vendor/bin` knows
+them all. A `composer-unused.php` or `composer-require-checker.json` that names
+a class from the library it configures therefore works locally and fatals in
+CI, which is the worst shape a difference can take.
+
+`ctw/ctw-qa` hit exactly this: its `composer-unused.php` filters using its own
+`Ctw\Qa\…` classes. The fix belongs in the config file rather than in this
+workflow —
+
+```php
+require_once __DIR__ . '/vendor/autoload.php';
+```
+
+— a no-op when the tool runs in tree, and the whole fix when it does not.
+Composer appends its autoloader rather than prepending it, so the tool's own
+classes keep priority and nothing it has already loaded is displaced.
 
 ## Rollout
 

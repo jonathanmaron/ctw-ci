@@ -35,7 +35,9 @@ WORKFLOW = "jonathanmaron/ctw-ci/.github/workflows/php-library.yml@v1"
 PHP_VERSIONS = ["8.5"]
 
 # Tried out rather than supported: the suite runs and cannot fail the build.
-PHP_VERSIONS_CANARY = ["8.6"]
+# Empty for now — the caller still gets the input, commented out, so turning a
+# canary back on is one line rather than a hunt through the README.
+PHP_VERSIONS_CANARY = []
 
 # ctw/ctw-qa below this swallows PHPStan's exit code, so the PHPStan job would
 # report success no matter what it found.
@@ -130,6 +132,20 @@ CANARY = """
             # is reliably green, move it into php_versions, where it blocks, and
             # drop this.
             php_versions_canary: '{php_versions_canary}'
+"""
+
+# What the caller gets when PHP_VERSIONS_CANARY is empty. Commented out rather
+# than omitted, because the reason a canary is off is worth carrying next to
+# the switch that turns it on.
+NO_CANARY = """
+            # No canary for now: 8.6 is deliberately not tested. Where
+            # these libraries reach Laminas the version cannot even be
+            # installed — laminas/laminas-diactoros 3.8.0 declares
+            # php ~8.2.0 || ~8.3.0 || ~8.4.0 || ~8.5.0 — and a job that fails
+            # at composer update reports nothing about the library. Uncomment
+            # once the ecosystem allows 8.6.
+            #
+            # php_versions_canary: '["8.6"]'
 """
 
 COMMIT_MESSAGE = """\U0001f477 ci: Replaced the single test job with the shared php-library pipeline
@@ -248,7 +264,7 @@ def assess(repository: Path) -> dict | None:
 
 
 def render(target: dict) -> str:
-    canary = ""
+    canary = NO_CANARY
     if PHP_VERSIONS_CANARY:
         canary = CANARY.format(
             canary_list=", ".join(PHP_VERSIONS_CANARY),
