@@ -1,0 +1,59 @@
+# Pipeline for ctw-ci itself.
+#
+# GitHub only reports a broken reusable workflow when a consumer repository
+# calls it, so a bad push here would surface as a failing run in some other
+# repository. These two jobs catch it here instead.
+
+name: CI
+
+on:
+    push:
+        branches:
+            - master
+        tags:
+            - '**'
+    pull_request:
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    Validate:
+        name: 'Validate workflows'
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup Python
+                uses: actions/setup-python@v7
+                with:
+                    python-version: '3.x'
+
+            -   name: Install PyYAML
+                run: pip install --quiet --disable-pip-version-check pyyaml
+
+            -   name: Validate
+                run: python3 bin/validate-workflows.py
+
+    Actionlint:
+        name: 'actionlint'
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            # Catches what the Python validator cannot: expression syntax,
+            # unknown contexts, bad `uses:` references and, through shellcheck,
+            # the `run:` scripts themselves.
+            -   name: Install actionlint
+                run: |
+                    bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+            -   name: Lint
+                run: ./actionlint -color

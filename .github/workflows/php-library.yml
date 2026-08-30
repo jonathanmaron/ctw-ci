@@ -1,0 +1,1255 @@
+# ---------------------------------------------------------------------------
+# php-library — the pipeline for a PHP library published to Packagist.
+#
+# One reusable workflow holding every job, so a pipeline is defined once here
+# instead of copied into every repository. Call it from a repository's own
+# ci.yml:
+#
+#     jobs:
+#         php-library:
+#             uses: jonathanmaron/ctw-ci/.github/workflows/php-library.yml@v1
+#             with:
+#                 php_versions: '["8.5", "8.6"]'
+#
+# Every job is on by default. Switch off what a library does not need with the
+# boolean inputs rather than by redefining jobs locally. See the README for the
+# input reference and for why each job is or is not on the version matrix.
+#
+# Four things about this file are forced by GitHub Actions rather than chosen,
+# and are worth knowing before editing it:
+#
+#   - Reusable workflow inputs are string, number or boolean only. The three
+#     version inputs are therefore JSON strings unwrapped with fromJSON(). Mind
+#     the quotes: '["8.5"]', not ["8.5"].
+#   - A reusable workflow cannot declare its own triggers, so there is no input
+#     for the paths that make a change worth a run. That filter lives in each
+#     caller's `on:` block.
+#   - Switching a job off with `if:` renders it as a skipped row rather than
+#     removing it from the run. The job does not execute either way.
+#   - Nothing retries a job that died on infrastructure. GitHub offers no
+#     equivalent of a retry restricted to runner failures, and retrying a job
+#     that failed on its own merits would be worse than not retrying at all.
+#
+# Jobs report through annotations where the tool can emit them — PHPStan,
+# Composer unused and Infection all speak GitHub's annotation format — and
+# through artifacts where it cannot. ECS is the one that cannot: console,
+# checkstyle, junit, json and gitlab are its whole set of formatters, so it
+# uploads checkstyle instead.
+# ---------------------------------------------------------------------------
+
+name: php-library
+
+on:
+    workflow_call:
+        inputs:
+
+            # --- Images and versions ---------------------------------------
+
+            php_version:
+                type: string
+                default: '8.5'
+                description: >-
+                    PHP for the eight jobs that are not on the matrix. Note the
+                    singular: php_versions, with an s, is the matrix. Keep this
+                    at the lowest PHP version the library supports — Backward
+                    compatibility also has to run on a PHP its own tool
+                    supports.
+
+            php_versions:
+                type: string
+                default: '["8.5", "8.6"]'
+                description: >-
+                    JSON array of every PHP version the library is tested
+                    against. Note the plural: php_version, without an s, is the
+                    single version the off-matrix jobs use.
+
+            php_versions_canary:
+                type: string
+                default: '[]'
+                description: >-
+                    JSON array of PHP versions the library is trying out rather
+                    than supporting. They run the suite in PHPUnit canary,
+                    which cannot fail the build. Empty by default, which means
+                    no version may fail — with no versions the job is skipped.
+                    Do not repeat a version from php_versions. A version is
+                    either supported, and blocks, or a candidate, and warns.
+
+            source_dir:
+                type: string
+                default: 'src'
+                description: >-
+                    Library source directory, relative to the project root.
+                    Read by the Composer require checker symbol whitelist and
+                    by the generated Infection configuration.
+
+            # --- System packages -------------------------------------------
+
+            apt_packages:
+                type: string
+                default: ''
+                description: >-
+                    Extra Debian packages to install in every job that resolves
+                    dependencies, as a space-separated list. For system
+                    binaries a library needs that the runner does not carry.
+                    Empty by default, in which case no apt index is fetched and
+                    nothing is installed.
+
+            apt_packages_test:
+                type: string
+                default: ''
+                description: >-
+                    Extra Debian packages for the PHPUnit jobs only, installed
+                    on top of apt_packages. Use this rather than apt_packages
+                    when only the test suite needs the binary, so the static
+                    analysis and package hygiene jobs do not pay for the
+                    install.
+
+            # --- Job toggles ------------------------------------------------
+
+            phpunit:
+                type: boolean
+                default: true
+                description: Run the test suite with coverage across php_versions.
+
+            phpunit_lowest_deps:
+                type: boolean
+                default: true
+                description: >-
+                    Re-run the test suite with --prefer-lowest --prefer-stable
+                    to guard the lower bounds of the constraints in
+                    composer.json.
+
+            phpstan:
+                type: boolean
+                default: true
+                description: Run PHPStan across php_versions.
+
+            ecs:
+                type: boolean
+                default: true
+                description: Run ECS across php_versions.
+
+            rector:
+                type: boolean
+                default: true
+                description: Run Rector in dry-run mode across php_versions.
+
+            composer_validate:
+                type: boolean
+                default: true
+                description: Validate composer.json strictly.
+
+            composer_normalize:
+                type: boolean
+                default: true
+                description: >-
+                    Check that composer.json is normalized: keys in the
+                    canonical order, entries within them sorted, formatting
+                    consistent. Reports the diff and fails; it never writes.
+
+            composer_audit:
+                type: boolean
+                default: true
+                description: Check installed packages against security advisories.
+
+            composer_requirements:
+                type: boolean
+                default: true
+                description: >-
+                    Verify that every symbol the library uses is covered by a
+                    declared dependency.
+
+            composer_unused:
+                type: boolean
+                default: true
+                description: >-
+                    Report declared dependencies that nothing in the library
+                    uses. The mirror of the Composer require checker. A package
+                    that is needed but never referenced in source is excluded
+                    through a composer-unused.php the library commits.
+
+            composer_outdated:
+                type: boolean
+                default: true
+                description: >-
+                    Report outdated direct dependencies. Scheduled runs only,
+                    so this stays inert unless the caller declares a cron.
+
+            backward_compatibility:
+                type: boolean
+                default: true
+                description: >-
+                    Compare the public API against the last tagged minor
+                    release and fail on a break. Passes without checking
+                    anything in a repository that has no tags yet. Switch it
+                    off in the pull request that makes a deliberate break, and
+                    for a 0.x library, where SemVer permits a break in a minor.
+
+            infection:
+                type: boolean
+                default: false
+                description: >-
+                    Mutation testing: change the source in small ways and check
+                    the suite notices. Off by default, and the one job here that
+                    does not suit every library. Infection needs PSR-4
+                    autoloaded classes: it mutates class members only, and it
+                    cannot mutate anything reached through files autoloading,
+                    because the original is required at bootstrap and the
+                    modified copy never loads. A library it cannot mutate
+                    reports 0% rather than failing.
+
+            # --- Behavior ---------------------------------------------------
+
+            composer_requirements_symbol_whitelist:
+                type: boolean
+                default: false
+                description: >-
+                    Generate a symbol whitelist from source_dir and pass it to
+                    the Composer require checker. Only for libraries that
+                    declare namespaced functions or constants and call them
+                    unqualified; the checker reports those as unknown global
+                    symbols. Replaces the checker's own default configuration,
+                    so leave it off for ordinary class-based libraries.
+
+            composer_requirements_config:
+                type: string
+                default: ''
+                description: >-
+                    Path to a Composer require checker config file committed in
+                    the library, relative to its root. For libraries with
+                    genuinely optional dependencies: a symbol reached only
+                    through a helper the consumer may never use is still
+                    reported as unknown, because the checker has no concept of
+                    an optional dependency. Whitelisting those symbols keeps the
+                    split honest, rather than promoting the dependency to a hard
+                    requirement every consumer then installs. Combines with
+                    composer_requirements_symbol_whitelist: the generated
+                    symbols are merged into this file's symbol-whitelist.
+
+            infection_min_msi:
+                type: string
+                default: ''
+                description: >-
+                    Minimum Mutation Score Indicator, as a percentage, below
+                    which Infection fails the job. Counts every mutant,
+                    including those no test covers. Empty by default, in which
+                    case the job reports the score and passes whatever it is —
+                    adopt it that way, read a few runs, then set a floor you are
+                    already above.
+
+            infection_min_covered_msi:
+                type: string
+                default: ''
+                description: >-
+                    Minimum MSI counting only mutants the suite covers, so it
+                    measures the quality of the tests that exist rather than how
+                    much of the library they reach. Line coverage is the other
+                    half of that pair. Empty by default, like infection_min_msi.
+
+permissions:
+    contents: read
+
+env:
+    # Where the tool jobs install a tool. Out of the library's own tree so it
+    # cannot influence the resolution the job is there to check.
+    CI_TOOLS_DIR: /tmp/ci-tools
+
+jobs:
+
+    # --- Tests -------------------------------------------------------------
+
+    PHPUnit:
+        name: 'PHPUnit [${{ matrix.php }}]'
+        if: inputs.phpunit
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php_versions) }}
+        env:
+            # composer.json's `test` script exports this; CI calls PHPUnit
+            # directly, so without it Xdebug stays off and no coverage is
+            # produced.
+            XDEBUG_MODE: coverage
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ matrix.php }}
+                    coverage: xdebug
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != '' || inputs.apt_packages_test != ''
+                env:
+                    APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ matrix.php }}-highest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ matrix.php }}-highest-composer-
+
+            # composer.lock is deliberately not committed, so every job
+            # resolves afresh and a scheduled run doubles as drift detection.
+            # build/ is gitignored, so report redirections would fail without
+            # the mkdir.
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            -   name: Run the suite
+                run: |
+                    php vendor/bin/phpunit \
+                        --coverage-text \
+                        --coverage-cobertura build/phpunit-cobertura.xml \
+                        --log-junit build/phpunit-junit.xml
+
+            # One line naming the total, for the run summary and for anything
+            # that scrapes a log. PHPUnit's own summary is colorized and repeats
+            # "Lines:" per file, so no pattern matches it reliably; the Cobertura
+            # report is machine-readable.
+            -   name: Total coverage
+                if: always()
+                run: |
+                    php -r 'preg_match("/line-rate=\"([0-9.]+)\"/",
+                    file_get_contents("build/phpunit-cobertura.xml"), $m);
+                    printf("Total coverage: %.2f%%\n", 100 * (float) $m[1]);' \
+                        | tee -a "$GITHUB_STEP_SUMMARY"
+
+            -   name: Upload reports
+                if: always()
+                uses: actions/upload-artifact@v7
+                with:
+                    name: phpunit-${{ matrix.php }}
+                    path: |
+                        build/phpunit
+                        build/phpunit-cobertura.xml
+                        build/phpunit-junit.xml
+                    retention-days: 7
+                    if-no-files-found: ignore
+
+    # Guards the lower bounds of the constraints in composer.json. Consumers
+    # get no composer.lock, so they are free to resolve them and nothing else
+    # tests that.
+    PHPUnit-lowest-deps:
+        name: 'PHPUnit lowest deps [${{ matrix.php }}]'
+        if: inputs.phpunit_lowest_deps
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php_versions) }}
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ matrix.php }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != '' || inputs.apt_packages_test != ''
+                env:
+                    APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ matrix.php }}-lowest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ matrix.php }}-lowest-composer-
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress --prefer-lowest --prefer-stable
+
+            -   name: Run the suite
+                run: php vendor/bin/phpunit --no-coverage
+
+    # The versions the library is trying out rather than supporting. The suite
+    # runs on them and cannot break the build, so the answer arrives before the
+    # move instead of during it. Promotion is the point: when a canary version
+    # is reliably green, move it to php_versions, where it blocks — blocking is
+    # what support means — and drop it from here.
+    #
+    # The `if` is not decoration. An empty matrix vector is an error in GitHub
+    # Actions, so the job has to be skipped before the matrix is expanded.
+    PHPUnit-canary:
+        name: 'PHPUnit canary [${{ matrix.php }}]'
+        if: inputs.php_versions_canary != '[]'
+        runs-on: ubuntu-latest
+        # Reports, never blocks.
+        continue-on-error: true
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php_versions_canary) }}
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ matrix.php }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != '' || inputs.apt_packages_test != ''
+                env:
+                    APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            -   name: Run the suite
+                run: php vendor/bin/phpunit --no-coverage
+
+    # --- Static analysis and coding standards ------------------------------
+
+    # Split out of `composer qa` so all three report in parallel instead of the
+    # run stopping at whichever fails first. All three are on the matrix.
+    #
+    # With no committed composer.lock every job resolves its own dependency
+    # graph, so anything reading that graph can differ per PHP version —
+    # including PHPStan, Rector and ECS, which look config-driven and are not.
+    PHPStan:
+        name: 'PHPStan [${{ matrix.php }}]'
+        if: inputs.phpstan
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php_versions) }}
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ matrix.php }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != ''
+                env:
+                    APT_PACKAGES: ${{ inputs.apt_packages }}
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ matrix.php }}-highest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ matrix.php }}-highest-composer-
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            # Inline annotations on the diff. The format writes workflow
+            # commands to stdout, so this run must not be redirected to a file.
+            # The grouped run below is what fails the job, so this exit code is
+            # deliberately ignored.
+            -   name: Annotate
+                run: php vendor/bin/phpstan analyse --no-progress --error-format=github || true
+
+            # Grouped summary in build/phpstan/. Needs ctw/ctw-qa 6.1.0+:
+            # earlier releases swallowed PHPStan's exit code and always
+            # reported success.
+            -   name: Analyse
+                run: composer phpstan
+
+            -   name: Upload reports
+                if: always()
+                uses: actions/upload-artifact@v7
+                with:
+                    name: phpstan-${{ matrix.php }}
+                    path: build/phpstan
+                    retention-days: 7
+                    if-no-files-found: ignore
+
+    ECS:
+        name: 'ECS [${{ matrix.php }}]'
+        if: inputs.ecs
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php_versions) }}
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ matrix.php }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != ''
+                env:
+                    APT_PACKAGES: ${{ inputs.apt_packages }}
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ matrix.php }}-highest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ matrix.php }}-highest-composer-
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            # ECS ships no GitHub formatter, so there are no annotations to be
+            # had: checkstyle to an artifact is the whole report. The plain run
+            # below is what fails the job.
+            -   name: Report
+                run: php vendor/bin/ecs check --clear-cache --output-format=checkstyle > build/ecs-checkstyle.xml || true
+
+            -   name: Check
+                run: composer ecs
+
+            -   name: Upload reports
+                if: always()
+                uses: actions/upload-artifact@v7
+                with:
+                    name: ecs-${{ matrix.php }}
+                    path: build/ecs-checkstyle.xml
+                    retention-days: 7
+                    if-no-files-found: ignore
+
+    Rector:
+        name: 'Rector [${{ matrix.php }}]'
+        if: inputs.rector
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php_versions) }}
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ matrix.php }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != ''
+                env:
+                    APT_PACKAGES: ${{ inputs.apt_packages }}
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ matrix.php }}-highest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ matrix.php }}-highest-composer-
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            -   name: Dry run
+                run: composer rector
+
+    # --- Package hygiene ---------------------------------------------------
+
+    # Installs nothing, so it is the fastest signal in the run. Off the matrix:
+    # with no install there is no resolved graph to differ.
+    Composer-validate:
+        name: 'Composer validate'
+        if: inputs.composer_validate
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ inputs.php_version }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Validate
+                run: composer validate --strict --no-check-publish --no-interaction
+
+    # Reads composer.json and nothing else, so like Composer validate it needs
+    # no install. It does need the tool, and this one is a Composer plugin
+    # rather than a binary: the command lives in the throwaway project, so
+    # --working-dir runs it from there and the argument points it at the
+    # library's file. Off the matrix, and on php_version for the same reason as
+    # Backward compatibility — 2.52 of the tool declares nothing above ~8.5.0.
+    Composer-normalize:
+        name: 'Composer normalize'
+        if: inputs.composer_normalize
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ inputs.php_version }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            # A tool shipped as a Composer plugin installs but never activates
+            # unless it is allowed, and a plugin-optional one says so in a
+            # warning rather than an error — so its command would simply not
+            # exist. This project holds one tool and nothing else, which makes
+            # allowing them safe here in a way it would not be in the library's
+            # own tree.
+            -   name: Install the tool out of tree
+                env:
+                    CI_TOOL: 'ergebnis/composer-normalize:^2.52'
+                run: |
+                    mkdir -p "$CI_TOOLS_DIR"
+                    composer --working-dir="$CI_TOOLS_DIR" init \
+                        --quiet --no-interaction --name=ctw/ci-tools
+                    composer --working-dir="$CI_TOOLS_DIR" config allow-plugins true
+                    composer --working-dir="$CI_TOOLS_DIR" require \
+                        --no-interaction --no-progress "$CI_TOOL"
+
+            # --dry-run reports the diff and fails; it never writes. The fix is
+            # to run the same command without it, locally.
+            -   name: Check
+                run: |
+                    composer --working-dir="$CI_TOOLS_DIR" normalize --dry-run \
+                        "$GITHUB_WORKSPACE/composer.json"
+
+    # Off the matrix by choice: an advisory found on one PHP version is in
+    # practice the same one found on the others.
+    Composer-audit:
+        name: 'Composer audit'
+        if: inputs.composer_audit
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ inputs.php_version }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != ''
+                env:
+                    APT_PACKAGES: ${{ inputs.apt_packages }}
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            # --abandoned=report pins today's default. Composer 3 will fail on
+            # abandoned packages, which is a separate decision from advisories.
+            -   name: Audit
+                run: composer audit --no-interaction --abandoned=report
+
+    # Verifies every symbol the library uses is covered by a declared
+    # dependency, ext-* included. Installed out of tree so it cannot influence
+    # the library's own resolution. Off the matrix by choice, like Composer
+    # audit.
+    Composer-requirements:
+        name: 'Composer requirements'
+        if: inputs.composer_requirements
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ inputs.php_version }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != ''
+                env:
+                    APT_PACKAGES: ${{ inputs.apt_packages }}
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            -   name: Install the tool out of tree
+                env:
+                    CI_TOOL: 'maglnet/composer-require-checker:^4.24'
+                run: |
+                    mkdir -p "$CI_TOOLS_DIR"
+                    composer --working-dir="$CI_TOOLS_DIR" init \
+                        --quiet --no-interaction --name=ctw/ci-tools
+                    composer --working-dir="$CI_TOOLS_DIR" config allow-plugins true
+                    composer --working-dir="$CI_TOOLS_DIR" require \
+                        --no-interaction --no-progress "$CI_TOOL"
+
+            # A config file replaces the checker's own defaults entirely, so one
+            # is passed only when the library asks for it. Two things can ask:
+            # composer_requirements_symbol_whitelist, which generates the list
+            # from source_dir so it stays correct as functions are added, and
+            # composer_requirements_config, which points at a file the library
+            # commits. When both are set the generated symbols are merged into
+            # the committed file, so neither cancels the other out.
+            -   name: Check
+                env:
+                    SYMBOL_WHITELIST: ${{ inputs.composer_requirements_symbol_whitelist }}
+                    CONFIG: ${{ inputs.composer_requirements_config }}
+                    SOURCE_DIR: ${{ inputs.source_dir }}
+                run: |
+                    set -e
+
+                    # CONFIG is the input; EFFECTIVE_CONFIG is what is finally
+                    # passed to the tool, which may be the input, the generated
+                    # file, or the two merged. They must not share a name.
+                    EFFECTIVE_CONFIG=''
+
+                    if [ -n "$CONFIG" ]; then
+                        if [ ! -f "$CONFIG" ]; then
+                            echo "composer_requirements_config: no such file: $CONFIG" >&2
+                            exit 1
+                        fi
+                        jq empty "$CONFIG"
+                        EFFECTIVE_CONFIG="$CONFIG"
+                    fi
+
+                    if [ "$SYMBOL_WHITELIST" = "true" ]; then
+                        grep -rhoE '^(function|const) [A-Za-z_][A-Za-z0-9_]*' "$SOURCE_DIR" \
+                            | awk '{print $2}' | sort -u \
+                            | jq -R -s '{"symbol-whitelist": (split("\n") | map(select(length > 0)))}' \
+                            > build/composer-requirements-generated.json
+
+                        if [ -n "$EFFECTIVE_CONFIG" ]; then
+                            # Union the two symbol-whitelists; every other key
+                            # comes from the committed file, which is the
+                            # library's to own.
+                            jq -s '.[0] as $committed | .[1] as $generated
+                                   | ($committed * $generated)
+                                   | .["symbol-whitelist"] =
+                                       (($committed["symbol-whitelist"] // [])
+                                         + ($generated["symbol-whitelist"] // []) | unique)' \
+                                "$EFFECTIVE_CONFIG" build/composer-requirements-generated.json \
+                                > build/composer-requirements-config.json
+                        else
+                            mv build/composer-requirements-generated.json build/composer-requirements-config.json
+                        fi
+
+                        EFFECTIVE_CONFIG=build/composer-requirements-config.json
+                    fi
+
+                    if [ -n "$EFFECTIVE_CONFIG" ]; then
+                        echo "Using composer-require-checker config: $EFFECTIVE_CONFIG"
+                        "$CI_TOOLS_DIR"/vendor/bin/composer-require-checker check \
+                            --config-file="$EFFECTIVE_CONFIG" composer.json
+                    else
+                        "$CI_TOOLS_DIR"/vendor/bin/composer-require-checker check composer.json
+                    fi
+
+            -   name: Upload reports
+                if: always()
+                uses: actions/upload-artifact@v7
+                with:
+                    name: composer-requirements
+                    # Absent unless a config was generated, which happens only
+                    # when composer_requirements_symbol_whitelist is on. A
+                    # config the library commits is already in the repository
+                    # and is not re-uploaded.
+                    path: build/composer-requirements-config.json
+                    retention-days: 7
+                    if-no-files-found: ignore
+
+    # The mirror of the require checker: that job finds symbols used without a
+    # declared dependency, this one finds declared dependencies nothing uses.
+    # Installed out of tree for the same reason — and its own README advises
+    # against a local install for exactly that, because it pins its
+    # dependencies tightly. Off the matrix by choice, like the two above.
+    Composer-unused:
+        name: 'Composer unused'
+        if: inputs.composer_unused
+        runs-on: ubuntu-latest
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ inputs.php_version }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != ''
+                env:
+                    APT_PACKAGES: ${{ inputs.apt_packages }}
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            -   name: Install the tool out of tree
+                env:
+                    CI_TOOL: 'icanhazstring/composer-unused:^0.9.6'
+                run: |
+                    mkdir -p "$CI_TOOLS_DIR"
+                    composer --working-dir="$CI_TOOLS_DIR" init \
+                        --quiet --no-interaction --name=ctw/ci-tools
+                    composer --working-dir="$CI_TOOLS_DIR" config allow-plugins true
+                    composer --working-dir="$CI_TOOLS_DIR" require \
+                        --no-interaction --no-progress "$CI_TOOL"
+
+            # The tool defaults to the composer.json in the working directory,
+            # so it reads the library's even though the binary lives elsewhere.
+            #
+            # Annotations for the diff. The plain run below is what fails the
+            # job, so this exit code is deliberately ignored — same shape as the
+            # PHPStan job.
+            -   name: Annotate
+                run: '"$CI_TOOLS_DIR"/vendor/bin/composer-unused --no-progress --output-format=github || true'
+
+            -   name: Check
+                run: '"$CI_TOOLS_DIR"/vendor/bin/composer-unused --no-progress'
+
+    # The scheduled run as a whole is the drift detector; this only names what
+    # moved.
+    Composer-outdated:
+        name: 'Composer outdated [${{ matrix.php }}]'
+        if: inputs.composer_outdated && github.event_name == 'schedule'
+        runs-on: ubuntu-latest
+        continue-on-error: true
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php_versions) }}
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ matrix.php }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != ''
+                env:
+                    APT_PACKAGES: ${{ inputs.apt_packages }}
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            -   name: Outdated
+                run: composer outdated --direct --no-interaction
+
+    # --- Backward compatibility --------------------------------------------
+
+    # Consumers pin a constraint and resolve it themselves, with no lock file
+    # on either side, so a break shipped in a minor release reaches every one of
+    # them on their next composer update. Nothing else in the pipeline looks for
+    # that.
+    #
+    # The tool finds the last tagged minor itself and compares HEAD against it,
+    # so it needs the whole history and the tags rather than a shallow clone,
+    # and it only sees changes that are committed. Off the matrix like the other
+    # hygiene jobs, and it has to run on a PHP the tool itself supports: 8.21
+    # declares ~8.4.0 || ~8.5.0, which php_version satisfies as long as it is
+    # the lowest version the library supports.
+    Backward-compatibility:
+        name: 'Backward compatibility'
+        if: inputs.backward_compatibility
+        runs-on: ubuntu-latest
+        steps:
+            # The default shallow clone carries neither the history the tool
+            # walks nor the tags it picks the baseline from, so this job takes
+            # the whole repository.
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    fetch-depth: 0
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ inputs.php_version }}
+                    coverage: none
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            # A library with no release yet has nothing to compare against.
+            # That is not a misconfiguration, so the job passes rather than
+            # fails.
+            -   name: Look for a baseline
+                id: baseline
+                run: |
+                    if [ -z "$(git tag)" ]; then
+                        echo "No tags in this repository: nothing to compare against."
+                        echo "found=false" >> "$GITHUB_OUTPUT"
+                    else
+                        echo "found=true" >> "$GITHUB_OUTPUT"
+                    fi
+
+            -   name: Install apt packages
+                if: steps.baseline.outputs.found == 'true' && inputs.apt_packages != ''
+                env:
+                    APT_PACKAGES: ${{ inputs.apt_packages }}
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Install dependencies
+                if: steps.baseline.outputs.found == 'true'
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            -   name: Install the tool out of tree
+                if: steps.baseline.outputs.found == 'true'
+                env:
+                    CI_TOOL: 'roave/backward-compatibility-check:^8.21'
+                run: |
+                    mkdir -p "$CI_TOOLS_DIR"
+                    composer --working-dir="$CI_TOOLS_DIR" init \
+                        --quiet --no-interaction --name=ctw/ci-tools
+                    composer --working-dir="$CI_TOOLS_DIR" config allow-plugins true
+                    composer --working-dir="$CI_TOOLS_DIR" require \
+                        --no-interaction --no-progress "$CI_TOOL"
+
+            # No report format, so the console output is the whole result.
+            -   name: Check
+                if: steps.baseline.outputs.found == 'true'
+                run: '"$CI_TOOLS_DIR"/vendor/bin/roave-backward-compatibility-check'
+
+    # --- Mutation testing --------------------------------------------------
+
+    # Coverage says a line ran; this says the suite would notice if that line
+    # were wrong. Infection changes the source in small ways — an operator
+    # flipped, a return value replaced — and reports every mutant no test
+    # caught.
+    #
+    # Off by default, and the only job here that does not suit every library.
+    # Infection needs PSR-4 autoloaded classes. It mutates class members and not
+    # plain namespaced functions, and it cannot mutate anything a `files`
+    # autoload entry reaches, class or not: that file is required at bootstrap,
+    # so the modified copy Infection writes is never loaded and every mutant
+    # escapes.
+    #
+    # Neither case fails. Both report 0%, which looks like a weak suite and is
+    # not.
+    #
+    # Off the matrix like the other hygiene jobs. Mutation testing is the
+    # slowest thing in the pipeline and a mutant that survives on one PHP
+    # version survives on the others.
+    Infection:
+        name: 'Infection'
+        if: inputs.infection
+        runs-on: ubuntu-latest
+        env:
+            # Infection runs the suite itself and needs the coverage report to
+            # know which tests cover a mutant. composer.json's `test` script
+            # exports this; the job calls Infection directly, so it has to set
+            # it here.
+            XDEBUG_MODE: coverage
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+
+            -   name: Setup PHP
+                uses: shivammathur/setup-php@v2
+                with:
+                    php-version: ${{ inputs.php_version }}
+                    coverage: xdebug
+                    tools: composer:v2
+
+            -   name: PHP version
+                run: php --version
+
+            -   name: Install apt packages
+                if: inputs.apt_packages != '' || inputs.apt_packages_test != ''
+                env:
+                    APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
+                run: |
+                    set -- $APT_PACKAGES
+                    if [ "$#" -gt 0 ]; then
+                        sudo apt-get update -qq
+                        sudo apt-get install -y --no-install-recommends "$@"
+                    fi
+
+            -   name: Composer cache directory
+                id: composer-cache
+                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+            -   name: Cache Composer downloads
+                uses: actions/cache@v6
+                with:
+                    path: ${{ steps.composer-cache.outputs.dir }}
+                    key: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-${{ hashFiles('composer.json') }}
+                    restore-keys: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-
+
+            -   name: Install dependencies
+                run: |
+                    mkdir -p build
+                    composer update --no-interaction --no-progress
+
+            -   name: Install the tool out of tree
+                env:
+                    CI_TOOL: 'infection/infection:^0.35'
+                run: |
+                    mkdir -p "$CI_TOOLS_DIR"
+                    composer --working-dir="$CI_TOOLS_DIR" init \
+                        --quiet --no-interaction --name=ctw/ci-tools
+                    composer --working-dir="$CI_TOOLS_DIR" config allow-plugins true
+                    composer --working-dir="$CI_TOOLS_DIR" require \
+                        --no-interaction --no-progress "$CI_TOOL"
+
+            -   name: Mutate
+                env:
+                    MIN_MSI: ${{ inputs.infection_min_msi }}
+                    MIN_COVERED_MSI: ${{ inputs.infection_min_covered_msi }}
+                    SOURCE_DIR: ${{ inputs.source_dir }}
+                run: |
+                    set -e
+
+                    # Infection resolves every path in its configuration
+                    # relative to the directory that configuration sits in, so a
+                    # generated one has to be written to the project root rather
+                    # than into build/. The checkout is ephemeral, so that costs
+                    # nothing, and a config the library commits is left alone.
+                    CONFIG_FILE=''
+
+                    for candidate in infection.json5 infection.json; do
+                        if [ -f "$candidate" ]; then
+                            CONFIG_FILE="$candidate"
+                            break
+                        fi
+                    done
+
+                    if [ -z "$CONFIG_FILE" ]; then
+                        CONFIG_FILE=infection.json5
+                        printf '{ source: { directories: ["%s"] }, mutators: { "@default": true } }\n' \
+                            "$SOURCE_DIR" >"$CONFIG_FILE"
+                        echo "No Infection config committed; generated one for $SOURCE_DIR/."
+                    fi
+
+                    echo "Using Infection config: $CONFIG_FILE"
+
+                    # Built up rather than written out, because an empty
+                    # threshold has to mean "do not pass the flag at all":
+                    # --min-msi= with no value is an error, and zero is a floor
+                    # Infection would enforce.
+                    set -- --threads=max --no-progress --no-interaction
+                    set -- "$@" --configuration="$CONFIG_FILE"
+                    set -- "$@" --logger-github
+                    set -- "$@" --logger-text=build/infection-text.log
+
+                    if [ -n "$MIN_MSI" ]; then
+                        set -- "$@" --min-msi="$MIN_MSI"
+                    fi
+
+                    if [ -n "$MIN_COVERED_MSI" ]; then
+                        set -- "$@" --min-covered-msi="$MIN_COVERED_MSI"
+                    fi
+
+                    # With neither threshold set Infection exits 0 whatever the
+                    # score, so adopting the job cannot fail a run that passes
+                    # today. It still annotates every surviving mutant.
+                    "$CI_TOOLS_DIR"/vendor/bin/infection "$@"
+
+            -   name: Upload reports
+                if: always()
+                uses: actions/upload-artifact@v7
+                with:
+                    name: infection
+                    path: build/infection-text.log
+                    retention-days: 7
+                    if-no-files-found: ignore
