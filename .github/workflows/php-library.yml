@@ -290,6 +290,10 @@ jobs:
                 env:
                     APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -330,6 +334,9 @@ jobs:
             -   name: Total coverage
                 if: always()
                 run: |
+                    # $m is PHP's variable, not the shell's, and the single
+                    # quotes are what keep it out of the shell's hands.
+                    # shellcheck disable=SC2016
                     php -r 'preg_match("/line-rate=\"([0-9.]+)\"/",
                     file_get_contents("build/phpunit-cobertura.xml"), $m);
                     printf("Total coverage: %.2f%%\n", 100 * (float) $m[1]);' \
@@ -377,6 +384,10 @@ jobs:
                 env:
                     APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -439,6 +450,10 @@ jobs:
                 env:
                     APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -488,6 +503,10 @@ jobs:
                 env:
                     APT_PACKAGES: ${{ inputs.apt_packages }}
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -559,6 +578,10 @@ jobs:
                 env:
                     APT_PACKAGES: ${{ inputs.apt_packages }}
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -626,6 +649,10 @@ jobs:
                 env:
                     APT_PACKAGES: ${{ inputs.apt_packages }}
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -749,6 +776,10 @@ jobs:
                 env:
                     APT_PACKAGES: ${{ inputs.apt_packages }}
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -803,6 +834,10 @@ jobs:
                 env:
                     APT_PACKAGES: ${{ inputs.apt_packages }}
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -938,6 +973,10 @@ jobs:
                 env:
                     APT_PACKAGES: ${{ inputs.apt_packages }}
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -1013,6 +1052,10 @@ jobs:
                 env:
                     APT_PACKAGES: ${{ inputs.apt_packages }}
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -1081,6 +1124,10 @@ jobs:
                 env:
                     APT_PACKAGES: ${{ inputs.apt_packages }}
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq
@@ -1159,6 +1206,10 @@ jobs:
                 env:
                     APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
                 run: |
+                    # Deliberate word splitting: the input is a space-separated
+                    # list, and turning it into positional parameters is the
+                    # whole point of the line.
+                    # shellcheck disable=SC2086
                     set -- $APT_PACKAGES
                     if [ "$#" -gt 0 ]; then
                         sudo apt-get update -qq

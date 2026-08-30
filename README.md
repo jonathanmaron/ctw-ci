@@ -379,7 +379,22 @@ the `run:` scripts themselves.
 ```bash
 pip install pyyaml
 python3 bin/validate-workflows.py
+
+bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+./actionlint
 ```
+
+**Install `shellcheck` before trusting a local `actionlint` run.** It is a
+separate binary that `actionlint` shells out to, and it is absent from a plain
+workstation and present on a GitHub runner — so without it a local run passes
+and the same commit fails in CI. Everything under a `run:` goes unchecked until
+it is installed.
+
+The two shell idioms it objects to here are deliberate and carry a
+`# shellcheck disable` with the reason: `set -- $APT_PACKAGES` wants the word
+splitting that turns a space-separated input into positional parameters
+(SC2086), and the coverage one-liner's `$m` belongs to PHP rather than to the
+shell (SC2016).
 
 ## Versioning
 
