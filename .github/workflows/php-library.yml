@@ -458,10 +458,13 @@ jobs:
 
             # Inline annotations on the diff. The format writes workflow
             # commands to stdout, so this run must not be redirected to a file.
-            # The grouped run below is what fails the job, so this exit code is
-            # deliberately ignored.
+            # The grouped run below is what fails the job, so finding something
+            # here is not this step's business — but crashing is. 0 is clean and
+            # 1 is "reported something"; anything else is the tool failing to
+            # run, and a step that swallowed that would go green having produced
+            # no annotations at all.
             -   name: Annotate
-                run: php vendor/bin/phpstan analyse --no-progress --error-format=github || true
+                run: php vendor/bin/phpstan analyse --no-progress --error-format=github || [ "$?" -le 1 ]
 
             # Grouped summary in build/phpstan/. Needs ctw/ctw-qa 6.1.0+:
             # earlier releases swallowed PHPStan's exit code and always
@@ -533,9 +536,11 @@ jobs:
 
             # ECS ships no GitHub formatter, so there are no annotations to be
             # had: checkstyle to an artifact is the whole report. The plain run
-            # below is what fails the job.
+            # below is what fails the job, so only a crash concerns this step —
+            # see the note on the PHPStan job. Without the guard a tool that
+            # died would leave a truncated file and upload it as the report.
             -   name: Report
-                run: php vendor/bin/ecs check --clear-cache --output-format=checkstyle > build/ecs-checkstyle.xml || true
+                run: php vendor/bin/ecs check --clear-cache --output-format=checkstyle > build/ecs-checkstyle.xml || [ "$?" -le 1 ]
 
             -   name: Check
                 run: composer ecs
@@ -820,10 +825,10 @@ jobs:
             # formats the tool has, so the report is an artifact, the way ECS's
             # checkstyle is. The report goes to stdout and every other message
             # to stderr, so the redirection captures the XML alone. The plain
-            # run below is what fails the job, so this exit code is deliberately
-            # ignored — same shape as the PHPStan and ECS jobs.
+            # run below is what fails the job, so only a crash concerns this
+            # step — see the note on the PHPStan job.
             -   name: Report
-                run: '"$CI_TOOLS_DIR"/vendor/bin/composer-dependency-analyser --format=junit > build/composer-dependencies-junit.xml || true'
+                run: '"$CI_TOOLS_DIR"/vendor/bin/composer-dependency-analyser --format=junit > build/composer-dependencies-junit.xml || [ "$?" -le 1 ]'
 
             -   name: Check
                 run: '"$CI_TOOLS_DIR"/vendor/bin/composer-dependency-analyser'

@@ -305,8 +305,15 @@ requirement at all, and its symbols are reported as unknown instead.
 The job writes a **JUnit** report to an artifact, because `console` and `junit`
 are the two formats the tool has and neither is GitHub's annotation format. It
 runs the tool twice for the same reason PHPStan and ECS do — the reporting run
-is redirected into the file and its exit code ignored, then a plain run produces
-the readable log and is what fails the job.
+is redirected into the file, then a plain run produces the readable log and is
+what fails the job.
+
+The reporting run tolerates the tool *finding* something, since the second run
+is what decides the job, but not the tool *crashing*. All three reporting steps
+end in `|| [ "$?" -le 1 ]` rather than `|| true`: 0 is clean and 1 is "reported
+something", while 255, 137 and 139 are a fatal, an out-of-memory kill and a
+segfault. Under a plain `|| true` a step that died would go green having written
+a truncated file, and upload it as the report.
 
 #### Exclusions
 
@@ -478,9 +485,9 @@ says so at the top rather than leaving it to be inferred.
 Cutting a release moves the major tag onto the new commit:
 
 ```bash
-git tag -a v1.1.0 -m 'See CHANGELOG.md'
-git tag -f -a v1 -m 'Moved to v1.1.0'
-git push origin v1.1.0
+git tag -a v1.1.1 -m 'See CHANGELOG.md'
+git tag -f -a v1 -m 'Moved to v1.1.1'
+git push origin v1.1.1
 git push origin v1 --force
 ```
 

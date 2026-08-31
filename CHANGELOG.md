@@ -12,6 +12,31 @@ interpreted for reusable workflows as:
   pipelines behaving as they did.
 - **Patch** — a fix inside an existing job that does not change its interface.
 
+## 1.1.1
+
+### Fixed
+
+- **A reporting step that crashed reported success.** `PHPStan`'s `Annotate`
+  and the `Report` steps of `ECS` and `Composer dependencies` each ran their
+  tool with `|| true`, because finding something is the *next* step's business:
+  the reporting run produces the artifact or the annotations, and a plain run
+  after it decides the job.
+
+  `|| true` is too broad for that. It flattens 0 (clean), 1 (reported
+  something) and every crash — 255 for a PHP fatal, 137 for an out-of-memory
+  kill, 139 for a segfault — into success, so a tool that died left a truncated
+  file, uploaded it as the report, and showed a green step while doing it.
+
+  All three now end in `|| [ "$?" -le 1 ]`, which tolerates a verdict and
+  nothing else.
+
+  This does **not** separate "found something" from "the tool was
+  misconfigured": `shipmonk/composer-dependency-analyser` exits 1 for a bad
+  config file as well as for a finding, and PHPStan does the same. Only a crash
+  is newly caught. The plain run that follows already surfaced any of these in
+  the log; what changes is that the step no longer claims success while
+  producing nothing.
+
 ## 1.1.0
 
 > **On the version.** Replacing two jobs with one, removing a third, and
