@@ -14,9 +14,9 @@ interpreted for reusable workflows as:
 
 ## 1.1.0
 
-> **On the version.** Replacing two jobs with one and dropping four inputs is
-> a major change under the policy above, and this ships as a minor
-> deliberately. Every consumer of this workflow is in this fleet and under the
+> **On the version.** Replacing two jobs with one, removing a third, and
+> dropping eight inputs between them is a major change under the policy above,
+> and this ships as a minor deliberately. Every consumer of this workflow is in this fleet and under the
 > same ownership, so the migration is a scheduling problem rather than a
 > compatibility one.
 >
@@ -82,6 +82,28 @@ interpreted for reusable workflows as:
   `composer.json`; the tool loads that name from the project root by itself, so
   nothing points at it and no input has to exist for it. It is `.php`, so the
   default path filter already covers it.
+
+- **The `Infection` job, and the `infection`, `infection_min_msi` and
+  `infection_min_covered_msi` inputs.** Mutation testing leaves the workflow.
+
+  The job was off by default and no library in the fleet ever switched it on,
+  so what goes is a hundred lines that never ran: the out-of-tree install of
+  `infection/infection`, the `XDEBUG_MODE: coverage` override, the search for a
+  committed `infection.json5` or `infection.json` and the generated fallback
+  when there was neither, the two optional thresholds built up as arguments
+  because an empty one had to mean "omit the flag", and the
+  `build/infection-text.log` artifact.
+
+  Nothing replaces it. A library that wants mutation testing defines the job in
+  its own `ci.yml`; the definition this release deletes is in the `v1.0.0` tag,
+  as is the README section explaining when Infection is worth running.
+
+- **`source_dir`.** Its two readers were the require checker symbol whitelist
+  and the generated Infection configuration, and both are gone. `Composer
+  dependencies` takes its paths from the `autoload` and `autoload-dev` sections
+  of `composer.json`, so nothing reads the input at all — and
+  `bin/validate-workflows.py` fails a workflow that declares an input it never
+  references, so leaving it behind was not an option.
 
 ### Upgrading
 

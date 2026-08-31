@@ -122,7 +122,6 @@ jobs:
             # composer_dependencies: false
             # composer_outdated: false
             # backward_compatibility: false
-            # infection: true
 """
 
 CANARY = """
@@ -149,17 +148,17 @@ NO_CANARY = """
 
 COMMIT_MESSAGE = """\U0001f477 ci: Replaced the single test job with the shared php-library pipeline
 
-The workflow now runs thirteen jobs instead of one: PHPUnit, PHPUnit
+The workflow now runs twelve jobs instead of one: PHPUnit, PHPUnit
 lowest deps, PHPUnit canary, PHPStan, ECS, Rector, Composer validate,
 Composer normalize, Composer audit, Composer dependencies, Composer
-outdated, Backward compatibility and Infection.
+outdated and Backward compatibility.
 
 The job definitions live in jonathanmaron/ctw-ci and are called with
 uses:, pinned to the v1 major, so ci.yml keeps only what is specific to
 this repository.
 
-Infection is off by default and Composer outdated runs on the weekly
-schedule only, so eleven of the thirteen run on a push.
+Composer outdated runs on the weekly schedule only, so eleven of the
+twelve run on a push.
 """
 
 

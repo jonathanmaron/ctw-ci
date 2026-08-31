@@ -94,7 +94,6 @@ consumer passes, so mind the quotes.
 | `Composer dependencies`  | once, on `php_version`         | Shadow, unused and misplaced dependencies. JUnit artifact.                      |
 | `Composer outdated`      | once per `php_versions`        | Scheduled runs only. `continue-on-error`.                                       |
 | `Backward compatibility` | once, on `php_version`         | API break against the last tagged minor.                                        |
-| `Infection`              | once, on `php_version`         | Mutation testing. **Off by default**, and not right for every library.          |
 
 The QA tools are split into separate jobs rather than run through `composer qa`,
 so all of them report in parallel instead of the pipeline stopping at whichever
@@ -139,7 +138,7 @@ to commit a lock file and set `config.platform.php` — which pins Rector's
 composer-bound rules and PHPStan's `phpVersion` at the same time — not to drop
 the matrix.
 
-Seven jobs stay on `php_version` alone:
+Five jobs stay on `php_version` alone:
 
 - **`Composer validate`** installs nothing, so there is no resolved graph to
   differ. It is also the fastest signal in the run.
@@ -154,8 +153,6 @@ Seven jobs stay on `php_version` alone:
 - **`Backward compatibility`** compares two API surfaces, and that comparison
   does not change with the PHP running it. It also has to run on a PHP its own
   tool supports, which is a narrower set.
-- **`Infection`** is the slowest thing in the pipeline, and a mutant that
-  survives on one PHP version survives on the others.
 
 ### When a pipeline runs
 
@@ -206,11 +203,11 @@ button on the Actions tab covers the ad-hoc case before then.
 
 #### Versions
 
-| Input                 | Type   | Default            | Description                                                                   |
-|-----------------------|--------|--------------------|-------------------------------------------------------------------------------|
-| `php_version`         | string | `'8.5'`            | PHP for the eight jobs that are off the matrix.                               |
-| `php_versions`        | string | `'["8.5", "8.6"]'` | JSON array of every PHP version the library is tested against.                |
-| `php_versions_canary` | string | `'[]'`             | JSON array of versions tried out rather than supported. Non-blocking.         |
+| Input                 | Type   | Default            | Description                                                           |
+|-----------------------|--------|--------------------|-----------------------------------------------------------------------|
+| `php_version`         | string | `'8.5'`            | PHP for every job that is off the matrix.                             |
+| `php_versions`        | string | `'["8.5", "8.6"]'` | JSON array of every PHP version the library is tested against.        |
+| `php_versions_canary` | string | `'[]'`             | JSON array of versions tried out rather than supported. Non-blocking. |
 
 The canary is **currently off in every `ctw` library**, and `bin/rollout.py`
 writes the input commented out rather than omitting it. 8.6 could not be
@@ -219,7 +216,6 @@ installed at all wherever a library reaches Laminas —
 `php ~8.2.0 || ~8.3.0 || ~8.4.0 || ~8.5.0` — so the job failed at
 `composer update` and reported nothing about the library it was testing.
 Uncomment it once the ecosystem allows 8.6.
-| `source_dir`          | string | `'src'`            | Library source directory. Read by the generated Infection configuration.       |
 
 Keep `php_version` at the **lowest** PHP version the library supports.
 `Backward compatibility` and `Composer normalize` both have to run on a PHP their
@@ -249,9 +245,8 @@ running as fast as they did.
 
 #### Job toggles
 
-Every job is on by default except `Infection`. Switching one off renders it as a
-skipped row rather than removing it from the run; either way it does not
-execute.
+Every job is on by default. Switching one off renders it as a skipped row
+rather than removing it from the run; either way it does not execute.
 
 | Input                    | Job                      | Default |
 |--------------------------|--------------------------|---------|
@@ -266,7 +261,6 @@ execute.
 | `composer_dependencies`  | `Composer dependencies`  | `true`  |
 | `composer_outdated`      | `Composer outdated`      | `true`  |
 | `backward_compatibility` | `Backward compatibility` | `true`  |
-| `infection`              | `Infection`              | `false` |
 
 `backward_compatibility` needs a tagged release to compare against and is wrong
 for a `0.x` library, where SemVer permits a break in a minor. Neither case fails
@@ -274,15 +268,9 @@ a run on its own — an untagged repository passes without checking anything —
 a `0.x` library should switch it off, as should the pull request that makes a
 deliberate break.
 
-#### Behavior
-
-| Input                       | Type   | Default | Description                                                                |
-|-----------------------------|--------|---------|----------------------------------------------------------------------------|
-| `infection_min_msi`         | string | `''`    | Minimum Mutation Score Indicator, as a percentage. Empty enforces nothing. |
-| `infection_min_covered_msi` | string | `''`    | Minimum MSI counting only covered mutants. Empty enforces nothing.         |
-
-Adopt the Infection thresholds empty. The job then reports the score and passes
-whatever it is; read a few runs, then set a floor you are already above.
+There is no behavior input. Everything the workflow does is either on or off,
+and what a job needs to know beyond that it reads from a file the library
+commits.
 
 ### Dependencies
 
@@ -362,34 +350,32 @@ rot as the code it was written for is deleted.
 GitHub has no single report widget, so each job publishes what its tool can
 produce:
 
-| Job                     | Where the result shows up                                          |
-|-------------------------|--------------------------------------------------------------------|
-| `PHPUnit`               | `Total coverage: NN.NN%` in the run summary; HTML, Cobertura and JUnit in an artifact. |
-| `PHPStan`               | Inline annotations on the diff; grouped summary in an artifact.     |
-| `ECS`                   | Checkstyle XML in an artifact.                                      |
-| `Composer dependencies` | JUnit XML in an artifact.                                           |
-| `Infection`             | Inline annotations on the diff; text log in an artifact.            |
-| everything else         | Console output.                                                     |
+| Job                      | Where the result shows up                                          |
+|--------------------------|--------------------------------------------------------------------|
+| `PHPUnit`                | `Total coverage: NN.NN%` in the run summary; HTML, Cobertura and JUnit in an artifact. |
+| `PHPStan`                | Inline annotations on the diff; grouped summary in an artifact.     |
+| `ECS`                    | Checkstyle XML in an artifact.                                      |
+| `Composer dependencies`  | JUnit XML in an artifact.                                           |
+| everything else          | Console output.                                                     |
 
 Artifacts are kept for seven days.
 
-Neither ECS nor `Composer dependencies` has an annotation route. ECS has
-`console`, `checkstyle`, `junit`, `json` and `gitlab`, and the dependency tool
-has `console` and `junit`; each uploads the nearest thing to a GitHub formatter
-it has.
+PHPStan is the only tool here that speaks GitHub's annotation format, so it is
+the only job that reports on the diff. ECS has `console`, `checkstyle`, `junit`,
+`json` and `gitlab`, and `Composer dependencies` has `console` and `junit`; each
+uploads the nearest thing to a GitHub formatter it has.
 
 ### Out-of-tree tools
 
-Four jobs need a tool that must not join the library's dependency graph, because
-it would change the very resolution they are checking. Each installs its tool
-into a throwaway Composer project under `/tmp/ci-tools`:
+Three jobs need a tool that must not join the library's dependency graph,
+because it would change the very resolution they are checking. Each installs its
+tool into a throwaway Composer project under `/tmp/ci-tools`:
 
 | Job                      | Tool                                          |
 |--------------------------|-----------------------------------------------|
 | `Composer normalize`     | `ergebnis/composer-normalize:^2.52`           |
 | `Composer dependencies`  | `shipmonk/composer-dependency-analyser:^1.8`  |
 | `Backward compatibility` | `roave/backward-compatibility-check:^8.21`    |
-| `Infection`              | `infection/infection:^0.35`                   |
 
 The throwaway project sets `allow-plugins true`, which is safe there in a way it
 would not be in the library's own tree: it holds one tool and nothing else. A
@@ -397,19 +383,18 @@ tool shipped as a Composer plugin installs but never activates unless it is
 allowed, and a plugin-optional one says so in a warning rather than an error, so
 its command would simply not exist.
 
-**A tool running from `/tmp/ci-tools` knows nothing of the library's
-namespaces**, while the same tool run from the library's own `vendor/bin` knows
-them all, so a config file naming a class from the library it configures works
-locally and fatals in CI — the worst shape a difference can take. `ctw/ctw-qa`
-hit exactly that with its old `composer-unused.php`, which filters using its own
-`Ctw\Qa\…` classes, and the fix was a
-`require_once __DIR__ . '/vendor/autoload.php'` at the top of it.
+Only one of the three reads a config file the library commits, and it is the one
+that closed the trap the other two set. **A tool running from `/tmp/ci-tools`
+knows nothing of the library's namespaces**, so a PHP config file naming a class
+from the library it configures works locally, where the tool runs from
+`vendor/bin`, and fatals in CI. `ctw/ctw-qa` hit exactly that with its old
+`composer-unused.php`, which filters using its own `Ctw\Qa\…` classes, and the
+fix was a `require_once __DIR__ . '/vendor/autoload.php'` at the top of it.
 
-`composer-dependency-analyser.php` needs no such line, and it is the only config
-file any of these four tools reads. The tool requires the `vendor/autoload.php`
-belonging to the `composer.json` it is analyzing *before* it loads the config
-file, so the library's own classes are already reachable — out of tree exactly
-as in tree.
+`composer-dependency-analyser.php` needs no such line. The tool requires the
+`vendor/autoload.php` belonging to the `composer.json` it is analysing *before*
+it loads the config file, so the library's own classes are already reachable —
+out of tree exactly as in tree.
 
 ## Rollout
 
@@ -483,6 +468,12 @@ fixes without touching its `ci.yml`.
 - **Minor** — a new input or job is added, with a default that keeps existing
   pipelines behaving as they did.
 - **Patch** — a fix inside an existing job that does not change its interface.
+
+`1.1.0` is the one release so far that departs from this, shipping the removal
+of two jobs and eight inputs as a minor rather than cutting `v2`. Every consumer
+is in this fleet and under the same ownership, so the migration was a matter of
+landing the five affected repositories before the tag moved. The changelog entry
+says so at the top rather than leaving it to be inferred.
 
 Cutting a release moves the major tag onto the new commit:
 

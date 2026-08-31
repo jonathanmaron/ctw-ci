@@ -36,7 +36,7 @@ INPUT_REFERENCE = re.compile(r"inputs\.([A-Za-z0-9_]+)")
 MATRIX_REFERENCE = re.compile(r"matrix\.([A-Za-z0-9_]+)")
 
 # A shell assignment at the start of a line. Anchored so that a flag such as
-# --min-msi="$MIN_MSI" is not mistaken for one.
+# --working-dir="$CI_TOOLS_DIR" is not mistaken for one.
 SHELL_ASSIGNMENT = re.compile(r"(?:^|\n)\s*([A-Za-z_][A-Za-z0-9_]*)=")
 
 WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"

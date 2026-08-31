@@ -30,10 +30,11 @@
 #     equivalent of a retry restricted to runner failures, and retrying a job
 #     that failed on its own merits would be worse than not retrying at all.
 #
-# Jobs report through annotations where the tool can emit them — PHPStan and
-# Infection both speak GitHub's annotation format — and through artifacts where
-# it cannot. ECS uploads checkstyle, out of console, checkstyle, junit, json and
-# gitlab; Composer dependencies uploads JUnit, out of console and junit.
+# PHPStan is the only tool here that speaks GitHub's annotation format, so it is
+# the only job that reports on the diff. The others report through an artifact,
+# in the nearest thing each has to a GitHub formatter: ECS uploads checkstyle,
+# out of console, checkstyle, junit, json and gitlab, and Composer dependencies
+# uploads JUnit, out of console and junit.
 # ---------------------------------------------------------------------------
 
 name: php-library
@@ -48,7 +49,7 @@ on:
                 type: string
                 default: '8.5'
                 description: >-
-                    PHP for the eight jobs that are not on the matrix. Note the
+                    PHP for every job that is not on the matrix. Note the
                     singular: php_versions, with an s, is the matrix. Keep this
                     at the lowest PHP version the library supports — Backward
                     compatibility also has to run on a PHP its own tool
@@ -72,16 +73,6 @@ on:
                     no version may fail — with no versions the job is skipped.
                     Do not repeat a version from php_versions. A version is
                     either supported, and blocks, or a candidate, and warns.
-
-            source_dir:
-                type: string
-                default: 'src'
-                description: >-
-                    Library source directory, relative to the project root.
-                    Read by the generated Infection configuration, and by
-                    nothing else since Composer dependencies replaced the
-                    Composer require checker: that job takes its paths from the
-                    autoload and autoload-dev sections of composer.json.
 
             # --- System packages -------------------------------------------
 
@@ -181,41 +172,6 @@ on:
                     anything in a repository that has no tags yet. Switch it
                     off in the pull request that makes a deliberate break, and
                     for a 0.x library, where SemVer permits a break in a minor.
-
-            infection:
-                type: boolean
-                default: false
-                description: >-
-                    Mutation testing: change the source in small ways and check
-                    the suite notices. Off by default, and the one job here that
-                    does not suit every library. Infection needs PSR-4
-                    autoloaded classes: it mutates class members only, and it
-                    cannot mutate anything reached through files autoloading,
-                    because the original is required at bootstrap and the
-                    modified copy never loads. A library it cannot mutate
-                    reports 0% rather than failing.
-
-            # --- Behavior ---------------------------------------------------
-
-            infection_min_msi:
-                type: string
-                default: ''
-                description: >-
-                    Minimum Mutation Score Indicator, as a percentage, below
-                    which Infection fails the job. Counts every mutant,
-                    including those no test covers. Empty by default, in which
-                    case the job reports the score and passes whatever it is —
-                    adopt it that way, read a few runs, then set a floor you are
-                    already above.
-
-            infection_min_covered_msi:
-                type: string
-                default: ''
-                description: >-
-                    Minimum MSI counting only mutants the suite covers, so it
-                    measures the quality of the tests that exist rather than how
-                    much of the library they reach. Line coverage is the other
-                    half of that pair. Empty by default, like infection_min_msi.
 
 permissions:
     contents: read
@@ -1015,151 +971,3 @@ jobs:
             -   name: Check
                 if: steps.baseline.outputs.found == 'true'
                 run: '"$CI_TOOLS_DIR"/vendor/bin/roave-backward-compatibility-check'
-
-    # --- Mutation testing --------------------------------------------------
-
-    # Coverage says a line ran; this says the suite would notice if that line
-    # were wrong. Infection changes the source in small ways — an operator
-    # flipped, a return value replaced — and reports every mutant no test
-    # caught.
-    #
-    # Off by default, and the only job here that does not suit every library.
-    # Infection needs PSR-4 autoloaded classes. It mutates class members and not
-    # plain namespaced functions, and it cannot mutate anything a `files`
-    # autoload entry reaches, class or not: that file is required at bootstrap,
-    # so the modified copy Infection writes is never loaded and every mutant
-    # escapes.
-    #
-    # Neither case fails. Both report 0%, which looks like a weak suite and is
-    # not.
-    #
-    # Off the matrix like the other hygiene jobs. Mutation testing is the
-    # slowest thing in the pipeline and a mutant that survives on one PHP
-    # version survives on the others.
-    Infection:
-        name: 'Infection'
-        if: inputs.infection
-        runs-on: ubuntu-latest
-        env:
-            # Infection runs the suite itself and needs the coverage report to
-            # know which tests cover a mutant. composer.json's `test` script
-            # exports this; the job calls Infection directly, so it has to set
-            # it here.
-            XDEBUG_MODE: coverage
-        steps:
-            -   name: Checkout
-                uses: actions/checkout@v7
-
-            -   name: Setup PHP
-                uses: shivammathur/setup-php@v2
-                with:
-                    php-version: ${{ inputs.php_version }}
-                    coverage: xdebug
-                    tools: composer:v2
-
-            -   name: PHP version
-                run: php --version
-
-            -   name: Install apt packages
-                if: inputs.apt_packages != '' || inputs.apt_packages_test != ''
-                env:
-                    APT_PACKAGES: '${{ inputs.apt_packages }} ${{ inputs.apt_packages_test }}'
-                run: |
-                    # Deliberate word splitting: the input is a space-separated
-                    # list, and turning it into positional parameters is the
-                    # whole point of the line.
-                    # shellcheck disable=SC2086
-                    set -- $APT_PACKAGES
-                    if [ "$#" -gt 0 ]; then
-                        sudo apt-get update -qq
-                        sudo apt-get install -y --no-install-recommends "$@"
-                    fi
-
-            -   name: Composer cache directory
-                id: composer-cache
-                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
-
-            -   name: Cache Composer downloads
-                uses: actions/cache@v6
-                with:
-                    path: ${{ steps.composer-cache.outputs.dir }}
-                    key: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-${{ hashFiles('composer.json') }}
-                    restore-keys: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-
-
-            -   name: Install dependencies
-                run: |
-                    mkdir -p build
-                    composer update --no-interaction --no-progress
-
-            -   name: Install the tool out of tree
-                env:
-                    CI_TOOL: 'infection/infection:^0.35'
-                run: |
-                    mkdir -p "$CI_TOOLS_DIR"
-                    composer --working-dir="$CI_TOOLS_DIR" init \
-                        --quiet --no-interaction --name=ctw/ci-tools
-                    composer --working-dir="$CI_TOOLS_DIR" config allow-plugins true
-                    composer --working-dir="$CI_TOOLS_DIR" require \
-                        --no-interaction --no-progress "$CI_TOOL"
-
-            -   name: Mutate
-                env:
-                    MIN_MSI: ${{ inputs.infection_min_msi }}
-                    MIN_COVERED_MSI: ${{ inputs.infection_min_covered_msi }}
-                    SOURCE_DIR: ${{ inputs.source_dir }}
-                run: |
-                    set -e
-
-                    # Infection resolves every path in its configuration
-                    # relative to the directory that configuration sits in, so a
-                    # generated one has to be written to the project root rather
-                    # than into build/. The checkout is ephemeral, so that costs
-                    # nothing, and a config the library commits is left alone.
-                    CONFIG_FILE=''
-
-                    for candidate in infection.json5 infection.json; do
-                        if [ -f "$candidate" ]; then
-                            CONFIG_FILE="$candidate"
-                            break
-                        fi
-                    done
-
-                    if [ -z "$CONFIG_FILE" ]; then
-                        CONFIG_FILE=infection.json5
-                        printf '{ source: { directories: ["%s"] }, mutators: { "@default": true } }\n' \
-                            "$SOURCE_DIR" >"$CONFIG_FILE"
-                        echo "No Infection config committed; generated one for $SOURCE_DIR/."
-                    fi
-
-                    echo "Using Infection config: $CONFIG_FILE"
-
-                    # Built up rather than written out, because an empty
-                    # threshold has to mean "do not pass the flag at all":
-                    # --min-msi= with no value is an error, and zero is a floor
-                    # Infection would enforce.
-                    set -- --threads=max --no-progress --no-interaction
-                    set -- "$@" --configuration="$CONFIG_FILE"
-                    set -- "$@" --logger-github
-                    set -- "$@" --logger-text=build/infection-text.log
-
-                    if [ -n "$MIN_MSI" ]; then
-                        set -- "$@" --min-msi="$MIN_MSI"
-                    fi
-
-                    if [ -n "$MIN_COVERED_MSI" ]; then
-                        set -- "$@" --min-covered-msi="$MIN_COVERED_MSI"
-                    fi
-
-                    # With neither threshold set Infection exits 0 whatever the
-                    # score, so adopting the job cannot fail a run that passes
-                    # today. It still annotates every surviving mutant.
-                    "$CI_TOOLS_DIR"/vendor/bin/infection "$@"
-
-            -   name: Upload reports
-                if: always()
-                uses: actions/upload-artifact@v7
-                with:
-                    name: infection
-                    path: build/infection-text.log
-                    retention-days: 7
-                    if-no-files-found: ignore
