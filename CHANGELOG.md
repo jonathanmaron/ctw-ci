@@ -12,6 +12,112 @@ interpreted for reusable workflows as:
   pipelines behaving as they did.
 - **Patch** — a fix inside an existing job that does not change its interface.
 
+## 1.1.0
+
+> **On the version.** Replacing two jobs with one and dropping four inputs is
+> a major change under the policy above, and this ships as a minor
+> deliberately. Every consumer of this workflow is in this fleet and under the
+> same ownership, so the migration is a scheduling problem rather than a
+> compatibility one.
+>
+> What that costs is the opt-in. `@v1` is a moving tag resolved when a run
+> starts, so this reaches all eighteen consumers on their next run whether or
+> not they are ready — which is why the five repositories that pass a removed
+> input were changed *before* the tag moved. See "Upgrading" below.
+
+### Changed
+
+- **`Composer requirements` and `Composer unused` are one job, `Composer
+  dependencies`**, running `shipmonk/composer-dependency-analyser`.
+
+  The two owned one half each of the same question, and between them missed the
+  other half of it entirely:
+
+| Finding                                  | Was                       |
+|------------------------------------------|---------------------------|
+| Shadow dependency                        | `Composer requirements`   |
+| Unused dependency                        | `Composer unused`         |
+| Dev dependency in production code        | nothing                   |
+| Prod dependency used only in dev paths   | nothing                   |
+
+  The two new rows are the ones a published library feels. A `require-dev`
+  package used from `src/` is absent for every consumer, because nobody
+  installs somebody else's `require-dev`; a `require` package only the tests
+  touch is installed by every consumer for nothing. Neither tool had a concept
+  of the split, so neither could see either.
+
+  It is also faster by an order of magnitude — the tool's own benchmark reports
+  two seconds against 124 and 72 for the two it replaces, on a codebase of
+  15 000 files — and it has no Composer dependencies at all, which makes the
+  out-of-tree install into `/tmp/ci-tools` cheaper than it was for either.
+
+  Two things are lost, both worth naming rather than discovering:
+
+  - **No annotations on the diff.** `console` and `junit` are the two formats
+    the tool has, so the job uploads JUnit as an artifact, the way `ECS` uploads
+    checkstyle. `Composer unused` spoke GitHub's annotation format and put its
+    findings on the diff.
+  - **No unknown-*constant* error.** It reports unknown classes and unknown
+    functions; a constant reached through an undeclared dependency is the one
+    thing `composer-require-checker` caught that this does not.
+
+  `ctw/ctw-qa` 6.3.4 requires the same tool, so `composer qa` runs it locally
+  and the job is no longer the first place a finding appears.
+
+### Removed
+
+- **`composer_requirements` and `composer_unused`**, replaced by the single
+  `composer_dependencies`. Same default, `true`.
+
+- **`composer_requirements_symbol_whitelist`**, together with the sixty lines
+  of shell and `jq` that generated a config from `source_dir`, merged it into a
+  committed one, and uploaded `build/composer-requirements-config.json`. The
+  case it existed for cannot arise: it silenced a library's own namespaced
+  functions called unqualified, which the require checker reported as unknown
+  global symbols, and this tool does not record unqualified names in the
+  current namespace at all.
+
+- **`composer_requirements_config`**. Exclusions live in a
+  `composer-dependency-analyser.php` the library commits beside its
+  `composer.json`; the tool loads that name from the project root by itself, so
+  nothing points at it and no input has to exist for it. It is `.php`, so the
+  default path filter already covers it.
+
+### Upgrading
+
+There is no pin to bump, and that is the thing to plan around: every consumer
+pins `@v1`, which resolves when a run starts, so moving the tag hands the new
+job to all eighteen at once. GitHub rejects an input the workflow does not
+declare — the whole call fails to start, and no job reports at all — so a
+library still passing a removed one loses its entire run rather than quietly
+losing the setting. The five below were landed before the tag moved.
+
+| Repository                                    | Change                                                             |
+|-----------------------------------------------|--------------------------------------------------------------------|
+| `ctw-qa`                                      | Deleted `composer_requirements: false`; the new job passes         |
+| `ctw-skeleton`                                | Deleted `composer_requirements: false` and `composer-unused.php`   |
+| `ctw-composer-plugin-composerlenientplugin`   | Traded the JSON whitelist for a `composer-dependency-analyser.php` |
+| `ctw-middleware-htmlminifier`                 | Traded the JSON whitelist for a `composer-dependency-analyser.php` |
+| `ctw-middleware-httpexception`                | Traded the JSON whitelist for a `composer-dependency-analyser.php` |
+
+`ctw-qa` switched `Composer requirements` off because the checker reported some
+fifty ECS fixer and PHPStan extension classes as unknown symbols, and
+whitelisting a list that grows with every config change would have failed the
+job on ordinary work. That is now handled where it belongs: `ctw/ctw-qa` ships
+`DefaultIgnoredUnknownClassPatterns` and `DefaultIgnoredPackageErrors`, which
+exclude the two bundled namespaces by pattern and the PHPStan packages by name,
+so the job runs with everything else still guarded.
+
+`ctw-skeleton` needed `composer-unused.php` to stop `php` being reported as an
+unused requirement, its one placeholder class referencing no core symbol. The
+tool does not consider `php` a dependency at all — it looks at
+`vendor/name` packages and `ext-*` — so the file goes with no replacement.
+
+The other thirteen pass no removed input and report nothing new. That is a
+quieter landing than this change usually gets, and it is because
+`ctw/ctw-qa` 6.3.4 had already put the same tool in `composer qa`: the findings
+were dealt with locally before this release existed.
+
 ## 1.0.0
 
 First release. `php-library` runs fourteen jobs for a Composer library:

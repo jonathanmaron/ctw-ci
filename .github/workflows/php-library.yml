@@ -30,11 +30,10 @@
 #     equivalent of a retry restricted to runner failures, and retrying a job
 #     that failed on its own merits would be worse than not retrying at all.
 #
-# Jobs report through annotations where the tool can emit them — PHPStan,
-# Composer unused and Infection all speak GitHub's annotation format — and
-# through artifacts where it cannot. ECS is the one that cannot: console,
-# checkstyle, junit, json and gitlab are its whole set of formatters, so it
-# uploads checkstyle instead.
+# Jobs report through annotations where the tool can emit them — PHPStan and
+# Infection both speak GitHub's annotation format — and through artifacts where
+# it cannot. ECS uploads checkstyle, out of console, checkstyle, junit, json and
+# gitlab; Composer dependencies uploads JUnit, out of console and junit.
 # ---------------------------------------------------------------------------
 
 name: php-library
@@ -79,8 +78,10 @@ on:
                 default: 'src'
                 description: >-
                     Library source directory, relative to the project root.
-                    Read by the Composer require checker symbol whitelist and
-                    by the generated Infection configuration.
+                    Read by the generated Infection configuration, and by
+                    nothing else since Composer dependencies replaced the
+                    Composer require checker: that job takes its paths from the
+                    autoload and autoload-dev sections of composer.json.
 
             # --- System packages -------------------------------------------
 
@@ -152,21 +153,17 @@ on:
                 default: true
                 description: Check installed packages against security advisories.
 
-            composer_requirements:
+            composer_dependencies:
                 type: boolean
                 default: true
                 description: >-
-                    Verify that every symbol the library uses is covered by a
-                    declared dependency.
-
-            composer_unused:
-                type: boolean
-                default: true
-                description: >-
-                    Report declared dependencies that nothing in the library
-                    uses. The mirror of the Composer require checker. A package
-                    that is needed but never referenced in source is excluded
-                    through a composer-unused.php the library commits.
+                    Check the dependency graph against the code that uses it: a
+                    symbol used without a declared dependency, a declared
+                    dependency nothing uses, and a dependency in the wrong one
+                    of require and require-dev, either way round. ext-* is
+                    analyzed the same way. Exclusions go in the
+                    composer-dependency-analyser.php the library commits beside
+                    its composer.json.
 
             composer_outdated:
                 type: boolean
@@ -199,32 +196,6 @@ on:
                     reports 0% rather than failing.
 
             # --- Behavior ---------------------------------------------------
-
-            composer_requirements_symbol_whitelist:
-                type: boolean
-                default: false
-                description: >-
-                    Generate a symbol whitelist from source_dir and pass it to
-                    the Composer require checker. Only for libraries that
-                    declare namespaced functions or constants and call them
-                    unqualified; the checker reports those as unknown global
-                    symbols. Replaces the checker's own default configuration,
-                    so leave it off for ordinary class-based libraries.
-
-            composer_requirements_config:
-                type: string
-                default: ''
-                description: >-
-                    Path to a Composer require checker config file committed in
-                    the library, relative to its root. For libraries with
-                    genuinely optional dependencies: a symbol reached only
-                    through a helper the consumer may never use is still
-                    reported as unknown, because the checker has no concept of
-                    an optional dependency. Whitelisting those symbols keeps the
-                    split honest, rather than promoting the dependency to a hard
-                    requirement every consumer then installs. Combines with
-                    composer_requirements_symbol_whitelist: the generated
-                    symbols are merged into this file's symbol-whitelist.
 
             infection_min_msi:
                 type: string
@@ -807,13 +778,31 @@ jobs:
             -   name: Audit
                 run: composer audit --no-interaction --abandoned=report
 
-    # Verifies every symbol the library uses is covered by a declared
-    # dependency, ext-* included. Installed out of tree so it cannot influence
-    # the library's own resolution. Off the matrix by choice, like Composer
-    # audit.
-    Composer-requirements:
-        name: 'Composer requirements'
-        if: inputs.composer_requirements
+    # Reads the dependency graph against the code that uses it and reports four
+    # things: a symbol used without a declared dependency, a declared dependency
+    # nothing uses, and a dependency in the wrong one of require and
+    # require-dev, either way round. ext-* is analyzed the same way, so a
+    # missing extension requirement is found here too — which needs the
+    # extension present in the runner's PHP, or its symbols are unknown rather
+    # than attributed to it.
+    #
+    # Installed out of tree like the other tools. This one has no Composer
+    # dependencies at all, so an in-tree install would disturb the library's
+    # resolution less than most, but out of tree is still the rule: the graph
+    # this job reads is the graph it is there to check. It takes composer.json,
+    # vendor/ and the paths to scan from the working directory, which is the
+    # library root, so nothing has to be pointed at it.
+    #
+    # Exclusions live in a composer-dependency-analyser.php the library commits
+    # beside its composer.json. The tool loads that name from the working
+    # directory by itself, which is why this workflow passes no config path and
+    # declares no input for one.
+    #
+    # Off the matrix by choice, like Composer audit: an unused package or a
+    # missing ext-* found on 8.5 is the same one found on 8.6.
+    Composer-dependencies:
+        name: 'Composer dependencies'
+        if: inputs.composer_dependencies
         runs-on: ubuntu-latest
         steps:
             -   name: Checkout
@@ -862,7 +851,7 @@ jobs:
 
             -   name: Install the tool out of tree
                 env:
-                    CI_TOOL: 'maglnet/composer-require-checker:^4.24'
+                    CI_TOOL: 'shipmonk/composer-dependency-analyser:^1.8'
                 run: |
                     mkdir -p "$CI_TOOLS_DIR"
                     composer --working-dir="$CI_TOOLS_DIR" init \
@@ -871,156 +860,26 @@ jobs:
                     composer --working-dir="$CI_TOOLS_DIR" require \
                         --no-interaction --no-progress "$CI_TOOL"
 
-            # A config file replaces the checker's own defaults entirely, so one
-            # is passed only when the library asks for it. Two things can ask:
-            # composer_requirements_symbol_whitelist, which generates the list
-            # from source_dir so it stays correct as functions are added, and
-            # composer_requirements_config, which points at a file the library
-            # commits. When both are set the generated symbols are merged into
-            # the committed file, so neither cancels the other out.
+            # JUnit rather than annotations: console and junit are the two
+            # formats the tool has, so the report is an artifact, the way ECS's
+            # checkstyle is. The report goes to stdout and every other message
+            # to stderr, so the redirection captures the XML alone. The plain
+            # run below is what fails the job, so this exit code is deliberately
+            # ignored — same shape as the PHPStan and ECS jobs.
+            -   name: Report
+                run: '"$CI_TOOLS_DIR"/vendor/bin/composer-dependency-analyser --format=junit > build/composer-dependencies-junit.xml || true'
+
             -   name: Check
-                env:
-                    SYMBOL_WHITELIST: ${{ inputs.composer_requirements_symbol_whitelist }}
-                    CONFIG: ${{ inputs.composer_requirements_config }}
-                    SOURCE_DIR: ${{ inputs.source_dir }}
-                run: |
-                    set -e
-
-                    # CONFIG is the input; EFFECTIVE_CONFIG is what is finally
-                    # passed to the tool, which may be the input, the generated
-                    # file, or the two merged. They must not share a name.
-                    EFFECTIVE_CONFIG=''
-
-                    if [ -n "$CONFIG" ]; then
-                        if [ ! -f "$CONFIG" ]; then
-                            echo "composer_requirements_config: no such file: $CONFIG" >&2
-                            exit 1
-                        fi
-                        jq empty "$CONFIG"
-                        EFFECTIVE_CONFIG="$CONFIG"
-                    fi
-
-                    if [ "$SYMBOL_WHITELIST" = "true" ]; then
-                        grep -rhoE '^(function|const) [A-Za-z_][A-Za-z0-9_]*' "$SOURCE_DIR" \
-                            | awk '{print $2}' | sort -u \
-                            | jq -R -s '{"symbol-whitelist": (split("\n") | map(select(length > 0)))}' \
-                            > build/composer-requirements-generated.json
-
-                        if [ -n "$EFFECTIVE_CONFIG" ]; then
-                            # Union the two symbol-whitelists; every other key
-                            # comes from the committed file, which is the
-                            # library's to own.
-                            jq -s '.[0] as $committed | .[1] as $generated
-                                   | ($committed * $generated)
-                                   | .["symbol-whitelist"] =
-                                       (($committed["symbol-whitelist"] // [])
-                                         + ($generated["symbol-whitelist"] // []) | unique)' \
-                                "$EFFECTIVE_CONFIG" build/composer-requirements-generated.json \
-                                > build/composer-requirements-config.json
-                        else
-                            mv build/composer-requirements-generated.json build/composer-requirements-config.json
-                        fi
-
-                        EFFECTIVE_CONFIG=build/composer-requirements-config.json
-                    fi
-
-                    if [ -n "$EFFECTIVE_CONFIG" ]; then
-                        echo "Using composer-require-checker config: $EFFECTIVE_CONFIG"
-                        "$CI_TOOLS_DIR"/vendor/bin/composer-require-checker check \
-                            --config-file="$EFFECTIVE_CONFIG" composer.json
-                    else
-                        "$CI_TOOLS_DIR"/vendor/bin/composer-require-checker check composer.json
-                    fi
+                run: '"$CI_TOOLS_DIR"/vendor/bin/composer-dependency-analyser'
 
             -   name: Upload reports
                 if: always()
                 uses: actions/upload-artifact@v7
                 with:
-                    name: composer-requirements
-                    # Absent unless a config was generated, which happens only
-                    # when composer_requirements_symbol_whitelist is on. A
-                    # config the library commits is already in the repository
-                    # and is not re-uploaded.
-                    path: build/composer-requirements-config.json
+                    name: composer-dependencies
+                    path: build/composer-dependencies-junit.xml
                     retention-days: 7
                     if-no-files-found: ignore
-
-    # The mirror of the require checker: that job finds symbols used without a
-    # declared dependency, this one finds declared dependencies nothing uses.
-    # Installed out of tree for the same reason — and its own README advises
-    # against a local install for exactly that, because it pins its
-    # dependencies tightly. Off the matrix by choice, like the two above.
-    Composer-unused:
-        name: 'Composer unused'
-        if: inputs.composer_unused
-        runs-on: ubuntu-latest
-        steps:
-            -   name: Checkout
-                uses: actions/checkout@v7
-
-            -   name: Setup PHP
-                uses: shivammathur/setup-php@v2
-                with:
-                    php-version: ${{ inputs.php_version }}
-                    coverage: none
-                    tools: composer:v2
-
-            -   name: PHP version
-                run: php --version
-
-            -   name: Install apt packages
-                if: inputs.apt_packages != ''
-                env:
-                    APT_PACKAGES: ${{ inputs.apt_packages }}
-                run: |
-                    # Deliberate word splitting: the input is a space-separated
-                    # list, and turning it into positional parameters is the
-                    # whole point of the line.
-                    # shellcheck disable=SC2086
-                    set -- $APT_PACKAGES
-                    if [ "$#" -gt 0 ]; then
-                        sudo apt-get update -qq
-                        sudo apt-get install -y --no-install-recommends "$@"
-                    fi
-
-            -   name: Composer cache directory
-                id: composer-cache
-                run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
-
-            -   name: Cache Composer downloads
-                uses: actions/cache@v6
-                with:
-                    path: ${{ steps.composer-cache.outputs.dir }}
-                    key: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-${{ hashFiles('composer.json') }}
-                    restore-keys: ${{ runner.os }}-php${{ inputs.php_version }}-highest-composer-
-
-            -   name: Install dependencies
-                run: |
-                    mkdir -p build
-                    composer update --no-interaction --no-progress
-
-            -   name: Install the tool out of tree
-                env:
-                    CI_TOOL: 'icanhazstring/composer-unused:^0.9.6'
-                run: |
-                    mkdir -p "$CI_TOOLS_DIR"
-                    composer --working-dir="$CI_TOOLS_DIR" init \
-                        --quiet --no-interaction --name=ctw/ci-tools
-                    composer --working-dir="$CI_TOOLS_DIR" config allow-plugins true
-                    composer --working-dir="$CI_TOOLS_DIR" require \
-                        --no-interaction --no-progress "$CI_TOOL"
-
-            # The tool defaults to the composer.json in the working directory,
-            # so it reads the library's even though the binary lives elsewhere.
-            #
-            # Annotations for the diff. The plain run below is what fails the
-            # job, so this exit code is deliberately ignored — same shape as the
-            # PHPStan job.
-            -   name: Annotate
-                run: '"$CI_TOOLS_DIR"/vendor/bin/composer-unused --no-progress --output-format=github || true'
-
-            -   name: Check
-                run: '"$CI_TOOLS_DIR"/vendor/bin/composer-unused --no-progress'
 
     # The scheduled run as a whole is the drift detector; this only names what
     # moved.

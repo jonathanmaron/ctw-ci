@@ -91,8 +91,7 @@ consumer passes, so mind the quotes.
 | `Composer validate`      | once, on `php_version`         | No install at all, so it is the fastest signal.                                 |
 | `Composer normalize`     | once, on `php_version`         | `composer.json` is normalized. Reports a diff, never writes.                    |
 | `Composer audit`         | once, on `php_version`         | Security advisories against the graph that job resolved.                        |
-| `Composer requirements`  | once, on `php_version`         | Every used symbol is covered by a declared dependency.                          |
-| `Composer unused`        | once, on `php_version`         | Every declared dependency is used. Annotations on the diff.                     |
+| `Composer dependencies`  | once, on `php_version`         | Shadow, unused and misplaced dependencies. JUnit artifact.                      |
 | `Composer outdated`      | once per `php_versions`        | Scheduled runs only. `continue-on-error`.                                       |
 | `Backward compatibility` | once, on `php_version`         | API break against the last tagged minor.                                        |
 | `Infection`              | once, on `php_version`         | Mutation testing. **Off by default**, and not right for every library.          |
@@ -140,18 +139,18 @@ to commit a lock file and set `config.platform.php` — which pins Rector's
 composer-bound rules and PHPStan's `phpVersion` at the same time — not to drop
 the matrix.
 
-Eight jobs stay on `php_version` alone:
+Seven jobs stay on `php_version` alone:
 
 - **`Composer validate`** installs nothing, so there is no resolved graph to
   differ. It is also the fastest signal in the run.
 - **`Composer normalize`** reads `composer.json` and nothing else, so it has no
   resolved graph either. It also has to run on a PHP its own tool supports:
   version 2.52 declares nothing above `~8.5.0`.
-- **`Composer audit`**, **`Composer requirements`** and **`Composer unused`** do
-  read the resolved graph, so in principle they could differ per version. They
-  are off the matrix by choice: in practice an advisory, a missing `ext-*`
-  requirement or an unused package found on 8.5 is the same one found on 8.6,
-  and the pipeline already pays for six matrix jobs.
+- **`Composer audit`** and **`Composer dependencies`** do read the resolved
+  graph, so in principle they could differ per version. They are off the matrix
+  by choice: in practice an advisory, a missing `ext-*` requirement or an unused
+  package found on 8.5 is the same one found on 8.6, and the pipeline already
+  pays for six matrix jobs.
 - **`Backward compatibility`** compares two API surfaces, and that comparison
   does not change with the PHP running it. It also has to run on a PHP its own
   tool supports, which is a narrower set.
@@ -190,12 +189,12 @@ what they do:
 ```
 
 `composer.json` earns its place several times over: `Composer validate`,
-`Composer normalize`, `Composer audit`, `Composer requirements` and `Composer
-unused` all read it, and a constraint bump has to be tested even when no source
-file moves. `.github/workflows/**` is there so that changing the `@v1` pin runs
-the pipeline. `ecs.php`, `rector.php` and `composer-unused.php` need no entry of
-their own — they are `.php`. A library whose suite reads fixtures of another kind
-adds them.
+`Composer normalize`, `Composer audit` and `Composer dependencies` all read it,
+and a constraint bump has to be tested even when no source file moves.
+`.github/workflows/**` is there so that changing the `@v1` pin runs the
+pipeline. `ecs.php`, `rector.php` and `composer-dependency-analyser.php` need no
+entry of their own — they are `.php`. A library whose suite reads fixtures of
+another kind adds them.
 
 **One deliberate divergence** from a pipeline that runs on every push: a branch
 pushed with no pull request open gets no run. GitHub cannot express "push,
@@ -220,7 +219,7 @@ installed at all wherever a library reaches Laminas —
 `php ~8.2.0 || ~8.3.0 || ~8.4.0 || ~8.5.0` — so the job failed at
 `composer update` and reported nothing about the library it was testing.
 Uncomment it once the ecosystem allows 8.6.
-| `source_dir`          | string | `'src'`            | Library source directory. Read by the require checker whitelist and Infection. |
+| `source_dir`          | string | `'src'`            | Library source directory. Read by the generated Infection configuration.       |
 
 Keep `php_version` at the **lowest** PHP version the library supports.
 `Backward compatibility` and `Composer normalize` both have to run on a PHP their
@@ -264,8 +263,7 @@ execute.
 | `composer_validate`      | `Composer validate`      | `true`  |
 | `composer_normalize`     | `Composer normalize`     | `true`  |
 | `composer_audit`         | `Composer audit`         | `true`  |
-| `composer_requirements`  | `Composer requirements`  | `true`  |
-| `composer_unused`        | `Composer unused`        | `true`  |
+| `composer_dependencies`  | `Composer dependencies`  | `true`  |
 | `composer_outdated`      | `Composer outdated`      | `true`  |
 | `backward_compatibility` | `Backward compatibility` | `true`  |
 | `infection`              | `Infection`              | `false` |
@@ -278,28 +276,86 @@ deliberate break.
 
 #### Behavior
 
-| Input                                    | Type    | Default | Description                                                                               |
-|------------------------------------------|---------|---------|-------------------------------------------------------------------------------------------|
-| `composer_requirements_symbol_whitelist` | boolean | `false` | Generate a symbol whitelist from `source_dir` and pass it to composer-require-checker.    |
-| `composer_requirements_config`           | string  | `''`    | Path to a composer-require-checker config the library commits, for optional dependencies. |
-| `infection_min_msi`                      | string  | `''`    | Minimum Mutation Score Indicator, as a percentage. Empty enforces nothing.                |
-| `infection_min_covered_msi`              | string  | `''`    | Minimum MSI counting only covered mutants. Empty enforces nothing.                        |
-
-`composer_requirements_symbol_whitelist` is only for libraries that declare
-namespaced functions or constants and call them unqualified — the checker reports
-those as unknown global symbols. The generated whitelist replaces the checker's
-own default configuration, so leave it off for ordinary class-based libraries.
-
-`composer_requirements_config` is for the other case the checker cannot model: a
-**genuinely optional** dependency. The checker has no concept of one, so a symbol
-reached only through a helper the consumer may never use is still reported as
-unknown. The tempting fix — promoting the package to a hard `require` — makes
-every consumer install it, which is wrong when only a handful of source files
-touch it. Setting both merges the generated symbols into the committed file's
-`symbol-whitelist`, so neither cancels the other out.
+| Input                       | Type   | Default | Description                                                                |
+|-----------------------------|--------|---------|----------------------------------------------------------------------------|
+| `infection_min_msi`         | string | `''`    | Minimum Mutation Score Indicator, as a percentage. Empty enforces nothing. |
+| `infection_min_covered_msi` | string | `''`    | Minimum MSI counting only covered mutants. Empty enforces nothing.         |
 
 Adopt the Infection thresholds empty. The job then reports the score and passes
 whatever it is; read a few runs, then set a floor you are already above.
+
+### Dependencies
+
+`Composer dependencies` runs `shipmonk/composer-dependency-analyser`, which
+reads the dependency graph against the code that uses it and reports four
+things:
+
+| Finding                      | What it means                                                                                              |
+|------------------------------|------------------------------------------------------------------------------------------------------------|
+| Shadow dependency            | A symbol resolved through a package the library never declared — it arrived as somebody else's dependency. |
+| Unused dependency            | A declared `require` that no symbol uses. Every consumer installs it anyway.                               |
+| Dev dependency in production | A `require-dev` package used from source. Consumers never install it.                                      |
+| Prod dependency only in dev  | A `require` package only the tests touch. Every consumer installs it for nothing.                          |
+
+The last two are the ones a published library feels, and the two no tool in this
+pipeline used to look for. A `require-dev` package used from `src/` is absent for
+every consumer, because nobody installs somebody else's `require-dev`; a
+`require` package only the tests touch is installed by every consumer for
+nothing.
+
+It also reports **unknown classes and unknown functions** — a symbol that
+resolves to nothing at all, which is either a typo or a dependency no one
+declared. There is no unknown-*constant* error, and that is the one thing the
+old `Composer requirements` job caught that this one does not.
+
+`ext-*` is analyzed like any other dependency, so a missing extension
+requirement is still found here. That reads the extensions of the PHP actually
+running the job, which on a GitHub runner is what `shivammathur/setup-php`
+installed: an extension that is not there cannot be attributed to an `ext-*`
+requirement at all, and its symbols are reported as unknown instead.
+
+The job writes a **JUnit** report to an artifact, because `console` and `junit`
+are the two formats the tool has and neither is GitHub's annotation format. It
+runs the tool twice for the same reason PHPStan and ECS do — the reporting run
+is redirected into the file and its exit code ignored, then a plain run produces
+the readable log and is what fails the job.
+
+#### Exclusions
+
+They go in a `composer-dependency-analyser.php` the library commits beside its
+`composer.json`. The tool loads that name from the project root by itself, so
+the workflow passes no config path and declares no input for one — and the file
+is already covered by the default path filter, because it is `.php`.
+
+`ctw/ctw-qa` ships the defaults worth starting from, and its own README
+documents them. Past those, three cases need an entry:
+
+- **A package that is genuinely needed but never referenced in source** — a
+  Composer plugin, a PHPUnit extension, a binary the suite shells out to. This
+  is what `composer-unused.php` used to hold;
+  `ignoreErrorsOnPackage(..., [ErrorType::UNUSED_DEPENDENCY])` is the same
+  statement in the new file.
+- **A genuinely optional dependency.** A symbol reached only through an adapter
+  the consumer may never resolve is otherwise reported, and the tempting fix —
+  promoting the package to a hard `require` — makes every consumer install it.
+  Which call applies depends on where the symbol resolves from, and that is the
+  improvement: a package in `require-dev` produces a *dev dependency in
+  production code* and one arriving transitively a *shadow dependency*, each
+  ignored by name with `ignoreErrorsOnPackage()`, where the old whitelist knew
+  only "unknown symbol" and silenced it everywhere.
+  `ignoreErrorsOnPackageAndPath()` is narrower still, scoping the exception to
+  the files that actually reach it. `ignoreUnknownClasses()` is for the
+  remaining case, a package that is not installed at all.
+- **A symbol that is meant not to exist** — a test that calls an undefined
+  function on purpose, say. An imported name is recorded even when the target is
+  absent, so `ignoreUnknownFunctions()`, or `ignoreUnknownClasses()` for the
+  same trick with a class, says that the absence is the point.
+
+Two defaults are worth knowing before writing the file. **`require-dev` is not
+checked for unused packages** unless the config turns it on, because dev
+packages are often used only from CI rather than from any scanned path. And
+**an ignore that never matches is itself an error**, so the file cannot quietly
+rot as the code it was written for is deleted.
 
 ### Reports
 
@@ -311,30 +367,29 @@ produce:
 | `PHPUnit`               | `Total coverage: NN.NN%` in the run summary; HTML, Cobertura and JUnit in an artifact. |
 | `PHPStan`               | Inline annotations on the diff; grouped summary in an artifact.     |
 | `ECS`                   | Checkstyle XML in an artifact.                                      |
-| `Composer unused`       | Inline annotations on the diff.                                     |
+| `Composer dependencies` | JUnit XML in an artifact.                                           |
 | `Infection`             | Inline annotations on the diff; text log in an artifact.            |
-| `Composer requirements` | Console output, plus the generated config when one was generated.   |
 | everything else         | Console output.                                                     |
 
 Artifacts are kept for seven days.
 
-ECS is the one tool with no annotation route. `console`, `checkstyle`, `junit`,
-`json` and `gitlab` are its whole set of formatters, so checkstyle to an
-artifact is the best available.
+Neither ECS nor `Composer dependencies` has an annotation route. ECS has
+`console`, `checkstyle`, `junit`, `json` and `gitlab`, and the dependency tool
+has `console` and `junit`; each uploads the nearest thing to a GitHub formatter
+it has.
 
 ### Out-of-tree tools
 
-Five jobs need a tool that must not join the library's dependency graph, because
+Four jobs need a tool that must not join the library's dependency graph, because
 it would change the very resolution they are checking. Each installs its tool
 into a throwaway Composer project under `/tmp/ci-tools`:
 
-| Job                      | Tool                                        |
-|--------------------------|---------------------------------------------|
-| `Composer normalize`     | `ergebnis/composer-normalize:^2.52`         |
-| `Composer requirements`  | `maglnet/composer-require-checker:^4.24`    |
-| `Composer unused`        | `icanhazstring/composer-unused:^0.9.6`      |
-| `Backward compatibility` | `roave/backward-compatibility-check:^8.21`  |
-| `Infection`              | `infection/infection:^0.35`                 |
+| Job                      | Tool                                          |
+|--------------------------|-----------------------------------------------|
+| `Composer normalize`     | `ergebnis/composer-normalize:^2.52`           |
+| `Composer dependencies`  | `shipmonk/composer-dependency-analyser:^1.8`  |
+| `Backward compatibility` | `roave/backward-compatibility-check:^8.21`    |
+| `Infection`              | `infection/infection:^0.35`                   |
 
 The throwaway project sets `allow-plugins true`, which is safe there in a way it
 would not be in the library's own tree: it holds one tool and nothing else. A
@@ -342,24 +397,19 @@ tool shipped as a Composer plugin installs but never activates unless it is
 allowed, and a plugin-optional one says so in a warning rather than an error, so
 its command would simply not exist.
 
-**A config file these tools read cannot assume the library's autoloader.** The
-tool runs from `/tmp/ci-tools`, so its process knows nothing of the library's
-namespaces — while the same tool run from the library's own `vendor/bin` knows
-them all. A `composer-unused.php` or `composer-require-checker.json` that names
-a class from the library it configures therefore works locally and fatals in
-CI, which is the worst shape a difference can take.
+**A tool running from `/tmp/ci-tools` knows nothing of the library's
+namespaces**, while the same tool run from the library's own `vendor/bin` knows
+them all, so a config file naming a class from the library it configures works
+locally and fatals in CI — the worst shape a difference can take. `ctw/ctw-qa`
+hit exactly that with its old `composer-unused.php`, which filters using its own
+`Ctw\Qa\…` classes, and the fix was a
+`require_once __DIR__ . '/vendor/autoload.php'` at the top of it.
 
-`ctw/ctw-qa` hit exactly this: its `composer-unused.php` filters using its own
-`Ctw\Qa\…` classes. The fix belongs in the config file rather than in this
-workflow —
-
-```php
-require_once __DIR__ . '/vendor/autoload.php';
-```
-
-— a no-op when the tool runs in tree, and the whole fix when it does not.
-Composer appends its autoloader rather than prepending it, so the tool's own
-classes keep priority and nothing it has already loaded is displaced.
+`composer-dependency-analyser.php` needs no such line, and it is the only config
+file any of these four tools reads. The tool requires the `vendor/autoload.php`
+belonging to the `composer.json` it is analyzing *before* it loads the config
+file, so the library's own classes are already reachable — out of tree exactly
+as in tree.
 
 ## Rollout
 
